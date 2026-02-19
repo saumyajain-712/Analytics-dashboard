@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { 
   Search, 
   AlertCircle, 
@@ -26,124 +26,226 @@ import { Input } from './components/ui/input';
 import { Label } from './components/ui/label';
 import { toast } from 'sonner';
 
-// Mock data
-const generateMockData = () => {
-  const users = [
-    { userId: 'u001', userName: 'Alice Johnson' },
-    { userId: 'u002', userName: 'Bob Smith' },
-    { userId: 'u003', userName: 'Carol Williams' },
-    { userId: 'u004', userName: 'David Brown' },
-    { userId: 'u005', userName: 'Eve Davis' },
-    { userId: 'u006', userName: 'Frank Miller' },
-    { userId: 'u007', userName: 'Grace Wilson' },
-    { userId: 'u008', userName: 'Henry Moore' },
-  ];
-
-  const userStats = users.map((user) => {
-    const totalQueries = Math.floor(Math.random() * 500) + 100;
-    const failedQueries = Math.floor(totalQueries * (Math.random() * 0.15));
-    const successfulQueries = totalQueries - failedQueries;
-    
-    const highConfidence = Math.floor(successfulQueries * (0.4 + Math.random() * 0.3));
-    const mediumConfidence = Math.floor(successfulQueries * (0.2 + Math.random() * 0.2));
-    const lowConfidence = successfulQueries - highConfidence - mediumConfidence;
-    
-    return {
-      ...user,
-      totalQueries,
-      failedQueries,
-      successRate: Math.round(((successfulQueries / totalQueries) * 100)),
-      highConfidence,
-      mediumConfidence,
-      lowConfidence,
-    };
-  });
-
-  const totalQueries = userStats.reduce((sum, user) => sum + user.totalQueries, 0);
-  const totalFailed = userStats.reduce((sum, user) => sum + user.failedQueries, 0);
-  const totalHigh = userStats.reduce((sum, user) => sum + user.highConfidence, 0);
-  const totalMedium = userStats.reduce((sum, user) => sum + user.mediumConfidence, 0);
-  const totalLow = userStats.reduce((sum, user) => sum + user.lowConfidence, 0);
-
-  const trendData = Array.from({ length: 14 }, (_, i) => {
-    const date = new Date();
-    date.setDate(date.getDate() - (13 - i));
-    const total = Math.floor(Math.random() * 300) + 200;
-    const failed = Math.floor(total * 0.1);
-    return {
-      date: `${date.getMonth() + 1}/${date.getDate()}`,
-      total,
-      failed,
-      successful: total - failed,
-    };
-  });
-
-  const answeredQueries = totalQueries - totalFailed;
-
-  return {
-    totalQueries,
-    totalFailed,
-    userStats,
-    confidenceData: [
-      { 
-        name: 'High (>90%)', 
-        value: totalHigh, 
-        percentage: Math.round((totalHigh / answeredQueries) * 100),
-        color: '#10b981' 
-      },
-      { 
-        name: 'Medium (70-90%)', 
-        value: totalMedium, 
-        percentage: Math.round((totalMedium / answeredQueries) * 100),
-        color: '#f59e0b' 
-      },
-      { 
-        name: 'Low (<70%)', 
-        value: totalLow, 
-        percentage: Math.round((totalLow / answeredQueries) * 100),
-        color: '#ef4444' 
-      },
-    ],
-    trendData,
-  };
-};
+import { fetchTenants, fetchDashboard, fetchUserDrilldown } from '../api/analytics';
+import type { DashboardResponse, UserDrilldownResponse } from '../types/analytics';
 
 export default function App() {
-  const [selectedTenant, setSelectedTenant] = useState('acme-corp');
+  const [selectedTenant, setSelectedTenant] = useState('');
   const [startDate, setStartDate] = useState('2026-01-19');
   const [endDate, setEndDate] = useState('2026-02-18');
   const [dateRange, setDateRange] = useState('30d');
   const [selectedUser, setSelectedUser] = useState('all');
-  const mockData = generateMockData();
-  
-  const maxQueries = Math.max(...mockData.userStats.map(u => u.totalQueries));
-  const minQueries = Math.min(...mockData.userStats.map(u => u.totalQueries));
-  const avgSuccessRate = Math.round(
-    mockData.userStats.reduce((sum, u) => sum + u.successRate, 0) / mockData.userStats.length
-  );
 
-  const tenants = [
-    { id: 'acme-corp', name: 'Acme Corporation' },
-    { id: 'techstart-inc', name: 'TechStart Inc' },
-    { id: 'global-solutions', name: 'Global Solutions Ltd' },
-    { id: 'innovate-co', name: 'Innovate Co' },
-  ];
+  const [tenants, setTenants] = useState<{ id: string; name: string }[]>([]);
+  const [dashboard, setDashboard] = useState<DashboardResponse["data"] | null>(null);
+  const [loadingTenants, setLoadingTenants] = useState(false);
+  const [loadingDashboard, setLoadingDashboard] = useState(false);
+
+  // ✅ NEW STATE (Drilldown)
+  const [drilldown, setDrilldown] = useState<UserDrilldownResponse["data"] | null>(null);
+  const [loadingDrilldown, setLoadingDrilldown] = useState(false);
+
+  // ===============================
+  // LOAD TENANTS
+  // ===============================
+  useEffect(() => {
+    let cancelled = false;
+
+    (async () => {
+      try {
+        setLoadingTenants(true);
+        const res = await fetchTenants({
+          start_date: startDate,
+          end_date: endDate,
+          limit: 50,
+          sort: "queries_desc",
+        });
+
+        if (cancelled) return;
+
+        const mapped = res.tenants.map((t) => ({
+          id: t.tenant_id,
+          name: t.tenant_name,
+        }));
+
+        setTenants(mapped);
+
+        if (!selectedTenant && mapped.length > 0) {
+          setSelectedTenant(mapped[0].id);
+        }
+      } catch {
+        toast.error("Failed to load tenants");
+      } finally {
+        setLoadingTenants(false);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [startDate, endDate, selectedTenant]);
+
+  // ===============================
+  // LOAD DASHBOARD
+  // ===============================
+  useEffect(() => {
+    if (!selectedTenant) return;
+
+    let cancelled = false;
+
+    (async () => {
+      try {
+        setLoadingDashboard(true);
+        const res = await fetchDashboard({
+          tenant_id: selectedTenant,
+          start_date: startDate,
+          end_date: endDate,
+          page: 1,
+          page_size: 25,
+        });
+
+        if (cancelled) return;
+        setDashboard(res.data);
+        setSelectedUser("all");
+      } catch {
+        toast.error("Failed to load dashboard");
+        setDashboard(null);
+      } finally {
+        setLoadingDashboard(false);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedTenant, startDate, endDate]);
+
+  // ===============================
+  // ✅ LOAD USER DRILLDOWN (NEW)
+  // ===============================
+  useEffect(() => {
+    if (!selectedTenant) return;
+    if (selectedUser === "all") {
+      setDrilldown(null);
+      return;
+    }
+
+    let cancelled = false;
+
+    (async () => {
+      try {
+        setLoadingDrilldown(true);
+        const res = await fetchUserDrilldown(selectedUser, {
+          tenant_id: selectedTenant,
+          start_date: startDate,
+          end_date: endDate,
+        });
+
+        if (cancelled) return;
+        setDrilldown(res.data);
+      } catch {
+        toast.error("Failed to load user drilldown");
+        setDrilldown(null);
+      } finally {
+        setLoadingDrilldown(false);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedTenant, selectedUser, startDate, endDate]);
+
+  const maxQueries = dashboard?.summary.max_queries_per_user ?? 0;
+  const minQueries = dashboard?.summary.min_queries_per_user ?? 0;
+  const avgSuccessRate = dashboard ? Math.round(dashboard.summary.success_rate_pct) : 0;
+
+  const confidenceData = useMemo(() => {
+    if (!dashboard) return [];
+    return [
+      {
+        name: "High (>90%)",
+        value: dashboard.confidence_distribution.high.count,
+        percentage: Math.round(dashboard.confidence_distribution.high.pct_of_answered),
+        color: "#10b981",
+      },
+      {
+        name: "Medium (70-90%)",
+        value: dashboard.confidence_distribution.medium.count,
+        percentage: Math.round(dashboard.confidence_distribution.medium.pct_of_answered),
+        color: "#f59e0b",
+      },
+      {
+        name: "Low (<70%)",
+        value: dashboard.confidence_distribution.low.count,
+        percentage: Math.round(dashboard.confidence_distribution.low.pct_of_answered),
+        color: "#ef4444",
+      },
+    ];
+  }, [dashboard]);
+
+  const trendData = useMemo(() => {
+    if (!dashboard) return [];
+    return dashboard.query_timeseries.series.map((s) => ({
+      date: s.date,
+      total: s.total_queries,
+      failed: s.failed_queries,
+      successful: s.total_queries - s.failed_queries,
+    }));
+  }, [dashboard]);
+
+  const userStats = useMemo(() => {
+    if (!dashboard) return [];
+    return dashboard.user_query_stats.users.map((u) => ({
+      userId: u.user_id,
+      userName: u.display_name,
+      totalQueries: u.total_queries,
+      failedQueries: u.failed_queries,
+      successRate: Math.round(u.success_rate_pct),
+      highConfidence: 0,
+      mediumConfidence: 0,
+      lowConfidence: 0,
+    }));
+  }, [dashboard]);
 
   const selectedTenantName = tenants.find(t => t.id === selectedTenant)?.name || '';
   const dateRangeText = `${startDate} to ${endDate}`;
 
+  // ✅ UPDATED HANDLER (Drilldown Enabled)
   const handleConfidenceClick = (name: string) => {
-    toast.info(`Drilling down into ${name} confidence queries`, {
-      description: 'This feature would show detailed queries and help identify low-performing areas.',
+    if (selectedUser === "all") {
+      toast.info(`Select a user to view drilldown counts`, {
+        description: `Drilldown is counts-only per user (v1).`,
+      });
+      return;
+    }
+
+    if (loadingDrilldown) {
+      toast.info("Loading drilldown...");
+      return;
+    }
+
+    if (!drilldown) {
+      toast.error("No drilldown data available for this user");
+      return;
+    }
+
+    const lines = drilldown.breakdown
+      .map((b) => `${b.label}: ${b.count}`)
+      .join(" • ");
+
+    toast.info(`User drilldown — ${name}`, {
+      description: lines,
     });
   };
 
   const filteredUserStats = selectedUser === 'all' 
-    ? mockData.userStats 
-    : mockData.userStats.filter(u => u.userId === selectedUser);
+    ? userStats 
+    : userStats.filter(u => u.userId === selectedUser);
 
   return (
     <div className="min-h-screen bg-gray-50">
+      {/* ---- REST OF YOUR FILE REMAINS EXACTLY THE SAME ---- */}
       {/* Header */}
       <div className="bg-white border-b">
         <div className="container mx-auto px-4 py-6">
@@ -218,7 +320,7 @@ export default function App() {
               </SelectTrigger>
               <SelectContent>
                 <SelectItem value="all">All Users</SelectItem>
-                {mockData.userStats.map((user) => (
+                {userStats.map((user) => (
                   <SelectItem key={user.userId} value={user.userId}>
                     {user.userName}
                   </SelectItem>
@@ -253,15 +355,15 @@ export default function App() {
         <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
           <MetricCard
             title="Total Queries"
-            value={mockData.totalQueries.toLocaleString()}
+            value={(dashboard?.summary.total_queries ?? 0).toLocaleString()}
             subtitle="Across all users"
             icon={Search}
             trend={{ value: 12.5, isPositive: true }}
           />
           <MetricCard
             title="Failed Queries"
-            value={mockData.totalFailed.toLocaleString()}
-            subtitle={`${((mockData.totalFailed / mockData.totalQueries) * 100).toFixed(1)}% failure rate`}
+            value={(dashboard?.summary.failed_queries ?? 0).toLocaleString()}
+            subtitle={`${dashboard ? (100 - dashboard.summary.success_rate_pct).toFixed(1) : "0.0"}% failure rate`}
             icon={AlertCircle}
             trend={{ value: 3.2, isPositive: false }}
           />
@@ -274,7 +376,7 @@ export default function App() {
           />
           <MetricCard
             title="Active Users"
-            value={mockData.userStats.length}
+            value={dashboard?.summary.active_users ?? 0}
             subtitle={`${minQueries} min, ${maxQueries} max queries`}
             icon={Users}
           />
@@ -291,13 +393,13 @@ export default function App() {
                 <h3 className="font-semibold text-lg mb-2">Key Insights</h3>
                 <div className="flex flex-wrap gap-2">
                   <Badge variant="secondary">
-                    {mockData.confidenceData[0].percentage}% High Confidence Queries
+                    {confidenceData[0]?.percentage ?? 0}% High Confidence Queries
                   </Badge>
                   <Badge variant="secondary">
-                    {mockData.userStats.filter(u => u.successRate >= 90).length} users with 90%+ success rate
+                    {userStats.filter(u => u.successRate >= 90).length} users with 90%+ success rate
                   </Badge>
                   <Badge variant="secondary">
-                    {mockData.userStats.filter(u => u.lowConfidence > u.highConfidence).length} users need attention
+                    {userStats.filter(u => u.lowConfidence > u.highConfidence).length} users need attention
                   </Badge>
                 </div>
               </div>
@@ -308,10 +410,10 @@ export default function App() {
         {/* Charts Row */}
         <div className="grid gap-6 lg:grid-cols-2">
           <ConfidenceChart 
-            data={mockData.confidenceData}
+            data={confidenceData}
             onSegmentClick={handleConfidenceClick}
           />
-          <QueryTrendChart data={mockData.trendData} />
+          <QueryTrendChart data={trendData} />
         </div>
 
         {/* User Stats Table */}
